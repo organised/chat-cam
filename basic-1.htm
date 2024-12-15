@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>64x64 B/W Capture</title>
+<style>
+  body {
+    font-family: sans-serif;
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    gap: 20px;
+    align-items: center;
+    justify-content: flex-start;
+  }
+  .controls, .playback-controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  .preview, .playback {
+    border: 2px solid #000;
+    width: 64px;
+    height: 64px;
+    image-rendering: pixelated;
+  }
+  .feedback {
+    font-weight: bold;
+  }
+  .hidden {
+    display: none;
+  }
+  .composite-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    margin-top: 20px;
+  }
+  .responsive {
+    max-width: 100%;
+    height: auto;
+  }
+  input[type="file"] {
+    display: none;
+  }
+  .icon-button {
+    border: none;
+    background: none;
+    cursor: pointer;
+    padding: 5px;
+  }
+  .icon-button svg {
+    width: 24px;
+    height: 24px;
+    stroke: #000;
+    fill: none;
+    stroke-width: 2;
+  }
+</style>
+</head>
+<body>
+<h1>64x64 B/W Capture</h1>
+
+<div class="controls">
+  <button class="icon-button" id="startButton" title="Start Recording">
+    <!-- Lucide Camera icon -->
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M14.5 4H9.5L8 6H4C2.9 6 2 6.9 2 8v9c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-4l-1.5-2z"/><circle cx="12" cy="13" r="3"/></svg>
+  </button>
+
+  <label for="fileUpload" class="icon-button" title="Upload Composite Image">
+    <!-- Lucide Upload icon -->
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 17v2h16v-2M12 12V3m-4 4l4-4 4 4"/></svg>
+  </label>
+  <input type="file" id="fileUpload" accept="image/png, image/jpeg"/>
+
+  <button class="icon-button" id="downloadButton" title="Download Composite Image">
+    <!-- Lucide Download icon -->
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 17v2h16v-2M12 12V3m-4 4l4 4 4-4"/></svg>
+  </button>
+</div>
+
+<div class="feedback" id="feedback"></div>
+
+<!-- Removed autoplay. Keep playsinline and muted. -->
+<video class="hidden" id="video" playsinline webkit-playsinline muted></video>
+<canvas class="hidden" id="captureCanvas" width="64" height="64"></canvas>
+<canvas class="hidden" id="compositeCanvas"></canvas>
+
+<div class="preview-container">
+  <canvas class="preview" id="previewCanvas" width="64" height="64"></canvas>
+</div>
+
+<div class="composite-container">
+  <img id="compositeImage" class="responsive" alt="Composite Frames"/>
+</div>
+
+<div class="playback-controls hidden" id="playbackControls">
+  <button class="icon-button" id="playPauseButton" title="Play/Pause">
+    <svg id="playIcon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" style="display:inline;"><path d="M5 3v18l15-9z"/></svg>
+    <svg id="pauseIcon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" style="display:none;"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+  </button>
+</div>
+
+<script>
+// Configuration
+const FRAME_WIDTH = 64;
+const FRAME_HEIGHT = 64;
+const FRAMES_COUNT = 30;        
+const FRAMES_PER_SECOND = 10;   
+const RECORD_DURATION = 3;      
+
+// Elements
+const video = document.getElementById('video');
+const feedback = document.getElementById('feedback');
+const previewCanvas = document.getElementById('previewCanvas');
+const previewCtx = previewCanvas.getContext('2d');
+const captureCanvas = document.getElementById('captureCanvas');
+const captureCtx = captureCanvas.getContext('2d');
+const compositeCanvas = document.getElementById('compositeCanvas');
+const compositeCtx = compositeCanvas.getContext('2d');
+const compositeImage = document.getElementById('compositeImage');
+const startButton = document.getElementById('startButton');
+const downloadButton = document.getElementById('downloadButton');
+const fileUpload = document.getElementById('fileUpload');
+const playbackControls = document.getElementById('playbackControls');
+const playPauseButton = document.getElementById('playPauseButton');
+const playIcon = document.getElementById('playIcon');
+const pauseIcon = document.getElementById('pauseIcon');
+
+// State
+let stream = null;
+let frames = [];
+let recording = false;
+let playbackInterval = null;
+let playbackIndex = 0;
+let playing = false;
+
+// Steps to request camera
+async function initCamera() {
+  stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+  video.srcObject = stream;
+
+  // Explicitly play the video after setting the srcObject
+  await video.play(); 
+
+  feedback.textContent = 'Camera feed active. Ready to record.';
+  updatePreview();
+}
+
+// Convert frame to B/W (2-bit)
+function convertToBlackAndWhite(imageData) {
+  const d = imageData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const avg = (d[i] + d[i+1] + d[i+2]) / 3;
+    const val = avg < 128 ? 0 : 255;
+    d[i] = val;
+    d[i+1] = val;
+    d[i+2] = val;
+  }
+  return imageData;
+}
+
+// Capture a frame
+function captureFrame() {
+  captureCtx.drawImage(video, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+  let frameData = captureCtx.getImageData(0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+  frameData = convertToBlackAndWhite(frameData);
+  captureCtx.putImageData(frameData, 0, 0);
+  frames.push(frameData);
+  previewCtx.putImageData(frameData, 0, 0);
+}
+
+// Create composite image
+function createComposite() {
+  const cols = 6;
+  const rows = Math.ceil(FRAMES_COUNT / cols);
+  compositeCanvas.width = FRAME_WIDTH * cols;
+  compositeCanvas.height = FRAME_HEIGHT * rows;
+
+  for (let i = 0; i < frames.length; i++) {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    compositeCtx.putImageData(frames[i], col * FRAME_WIDTH, row * FRAME_HEIGHT);
+  }
+
+  compositeImage.src = compositeCanvas.toDataURL('image/png');
+  feedback.textContent = 'Capture complete. Composite image ready.';
+  playbackControls.classList.remove('hidden');
+}
+
+// Download composite image
+function downloadComposite() {
+  const link = document.createElement('a');
+  link.href = compositeImage.src;
+  link.download = 'composite.png';
+  link.click();
+}
+
+// Playback from composite image
+function startPlayback() {
+  if (!frames || frames.length === 0) return;
+  playing = true;
+  togglePlayPauseIcons();
+  playbackInterval = setInterval(() => {
+    if (playbackIndex >= frames.length) {
+      playbackIndex = 0;
+    }
+    previewCtx.putImageData(frames[playbackIndex], 0, 0);
+    playbackIndex++;
+  }, 1000 / FRAMES_PER_SECOND);
+}
+
+function pausePlayback() {
+  playing = false;
+  togglePlayPauseIcons();
+  clearInterval(playbackInterval);
+}
+
+function togglePlayback() {
+  if (playing) {
+    pausePlayback();
+  } else {
+    startPlayback();
+  }
+}
+
+function togglePlayPauseIcons() {
+  if (playing) {
+    playIcon.style.display = 'none';
+    pauseIcon.style.display = 'inline';
+  } else {
+    playIcon.style.display = 'inline';
+    pauseIcon.style.display = 'none';
+  }
+}
+
+// Extract frames from uploaded composite image
+function extractFramesFromComposite(img) {
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = img.naturalWidth;
+  tempCanvas.height = img.naturalHeight;
+  const tempCtx = tempCanvas.getContext('2d');
+  tempCtx.drawImage(img, 0, 0);
+  
+  const cols = 6;
+  const rows = Math.ceil(FRAMES_COUNT / cols);
+  const extractedFrames = [];
+
+  for (let i = 0; i < FRAMES_COUNT; i++) {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const imageData = tempCtx.getImageData(col * FRAME_WIDTH, row * FRAME_HEIGHT, FRAME_WIDTH, FRAME_HEIGHT);
+    extractedFrames.push(imageData);
+  }
+  
+  return extractedFrames;
+}
+
+// Real-time preview update
+function updatePreview() {
+  if (stream && !recording && !playing) {
+    previewCtx.drawImage(video, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+    let frameData = previewCtx.getImageData(0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+    frameData = convertToBlackAndWhite(frameData);
+    previewCtx.putImageData(frameData, 0, 0);
+  }
+  requestAnimationFrame(updatePreview);
+}
+
+// Handlers
+startButton.addEventListener('click', async () => {
+  if (!stream) {
+    await initCamera();
+  }
+  if (recording) return;
+  recording = true;
+  frames = [];
+  feedback.textContent = 'Recording in progress...';
+  
+  let count = 0;
+  const interval = setInterval(() => {
+    captureFrame();
+    count++;
+    if (count >= FRAMES_COUNT) {
+      clearInterval(interval);
+      recording = false;
+      createComposite();
+    }
+  }, 1000 / FRAMES_PER_SECOND);
+});
+
+downloadButton.addEventListener('click', () => {
+  downloadComposite();
+});
+
+fileUpload.addEventListener('change', () => {
+  const file = fileUpload.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    compositeImage.onload = () => {
+      frames = extractFramesFromComposite(compositeImage);
+      feedback.textContent = 'Composite loaded. Ready for playback.';
+      playbackControls.classList.remove('hidden');
+    };
+    compositeImage.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+});
+
+playPauseButton.addEventListener('click', togglePlayback);
+</script>
+</body>
+</html>
